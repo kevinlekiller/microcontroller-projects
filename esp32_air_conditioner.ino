@@ -20,8 +20,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-//#define DEBUG
-
 /* AC Side | Arduino Side | Function
    blue    | white        | compressor
    orange  | orange       | fan low
@@ -37,55 +35,52 @@
 
 #define LED_BUILTIN 2
 #define ONE_WIRE_BUS 27 // Pin 27 of the ESP32 for the DS18B20 temp sensor.
-#define TEMPTIME 1000
+#define TEMPTIME 1000 // Delay between checking temperature sensor.
 
 typedef struct {
   const short relay;
   const short pin;
 } relayArr;
 
-relayArr relays[RELAYS] = { // Pins for the relays
+relayArr relays[RELAYS] = { // Pins for the relays.
   {FANL, 19},
   {FANM, 18},
   {FANH, 17},
   {COMPRESSOR, 16}
 };
 
-const unsigned short LOOPDELAY = 500;
-const unsigned short LOGICDLEAY = 2000;
-const unsigned long COMPMAXTIME = 1200000;
-const unsigned long COMPGRACETIME = 120000;
-const unsigned long FANOFFTIME = 60000;
-const unsigned long FANONTIME = 20000;
-// Room temp needs to be at least this much higher than desired temp to start compressor
-const float tempDifferentialHigh = 1.0;
-// Room temp needs to be at least this much lower than desired temp for compressor to stop
-const float tempDifferentialLow = 0.1;
+// Holds the last x runtime for the compressor.
+#define COMPHISTORY 10
+unsigned long compHistory[COMPHISTORY] = {
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+
+const unsigned short LOOPDELAY = 500; // Main loop delay.
+const unsigned short LOGICDLEAY = 2000; // Delay between check compressor / fan status.
+const unsigned long COMPMAXTIME = 1200000; // Max amount of milliseconds compressor can run.
+const unsigned long COMPGRACETIME = 120000; // Amount of milliseconds to wait between cycling compressor.
+const unsigned long FANOFFTIME = 60000; // Amount of milliseconds to keep fan on after turning off compressor.
+// Min and max values for temp differentials.
+const float minTempDiff = 0.25;
+const float maxTempDiff = 2.0;
 
 const char* SSID = "ssid";
-const char* WPAPASS = "key";
+const char* WPAPASS = "pass";
 
 bool checkMillis(unsigned long, unsigned long, bool);
 void checkTemp();
 void checkAC();
 void changeDesiredTemp(bool);
-void unitOff();
 void getTemp();
-#ifdef DEBUG
-void printSerial();
-#endif
 void toggleUnit();
+void changeDiff(bool, bool);
 void toggleAC();
 void toggleFanSpeed(bool);
 void toggleRelay(short, bool);
 void checkWiFi();
-void webBase();
-void webAcPower();
-void webTempUp();
-void webTempDown();
-void webFanUp();
-void webFanDown();
+void webProcess();
 String formatHtml();
+void updateCompHistory();
 
 bool unitOn = 0;
 bool wantAC = 0;
@@ -99,6 +94,10 @@ unsigned short fanSpeed = 0;
 
 float desiredTemp = 25.0;
 float roomTemp = 0.0;
+// Room temp needs to be at least this much higher than desired temp to start compressor
+float tempDifferentialHigh = 0.5;
+// Room temp needs to be at least this much lower than desired temp for compressor to stop
+float tempDifferentialLow = 0.5;
 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature tempSensor(&oneWire);
@@ -106,9 +105,6 @@ WebServer server(80);
 
 void setup()
 {
-#ifdef DEBUG
-  Serial.begin(9600);
-#endif
   compressorTime = millis();
   for (int i = 0; i < RELAYS; i++) {
     pinMode(relays[i].pin, OUTPUT);
@@ -119,26 +115,23 @@ void setup()
   getTemp();
   checkWiFi();
 
-  server.on("/", webBase);
-  server.on("/power", webAcPower);
-  server.on("/tempup", webTempUp);
-  server.on("/tempdown", webTempDown);
-  server.on("/fanup", webFanUp);
-  server.on("/fandown", webFanDown);
+  server.on("/", webProcess);
+  server.on("/power", webProcess);
+  server.on("/tempup", webProcess);
+  server.on("/tempdown", webProcess);
+  server.on("/fanup", webProcess);
+  server.on("/fandown", webProcess);
+  server.on("/hdiffup", webProcess);
+  server.on("/hdiffdown", webProcess);
+  server.on("/ldiffup", webProcess);
+  server.on("/ldiffdown", webProcess);
+  server.onNotFound(webProcess);
   server.begin();
 }
 
 bool checkMillis(unsigned long milliseconds, unsigned long difference, bool debug = 0)
 {
   if ((millis() - milliseconds) <= difference || millis() < milliseconds) {
-#ifdef DEBUG
-    if (debug) {
-      Serial.print("checkMillis() ");
-      Serial.print((millis() - milliseconds));
-      Serial.print("ms / ");
-      Serial.println(difference);
-    }
-#endif
     return 1;
   }
   return 0;
@@ -156,9 +149,6 @@ void loop()
     }
   }
   if (unitOn && !checkMillis(delayTimer, LOGICDLEAY)) {
-    #ifdef DEBUG
-      printSerial();
-    #endif
     checkTemp();
     checkAC();
     delayTimer = millis();
@@ -183,38 +173,27 @@ void checkWiFi()
   }
 }
 
-void webBase()
+void webProcess()
 {
-  server.send(200, "text/html", formatHtml()); 
-}
-
-void webAcPower()
-{
-  toggleUnit();
-  server.send(200, "text/html", formatHtml()); 
-}
-
-void webTempUp()
-{
-  changeDesiredTemp(1);
-  server.send(200, "text/html", formatHtml()); 
-}
-
-void webTempDown()
-{
-  changeDesiredTemp(0);
-  server.send(200, "text/html", formatHtml()); 
-}
-
-void webFanUp()
-{
-  toggleFanSpeed(1);
-  server.send(200, "text/html", formatHtml()); 
-}
-
-void webFanDown()
-{
-  toggleFanSpeed(0);
+  if (server.uri().endsWith("/power")) {
+    toggleUnit();
+  } else if (server.uri().endsWith("/tempup")) {
+    changeDesiredTemp(1);
+  } else if (server.uri().endsWith("/tempdown")) {
+    changeDesiredTemp(0);
+  } else if (server.uri().endsWith("/fanup")) {
+    toggleFanSpeed(1);
+  } else if (server.uri().endsWith("/fandown")) {
+    toggleFanSpeed(0);
+  } else if (server.uri().endsWith("/hdiffup")) {
+    changeDiff(1, 1);
+  } else if (server.uri().endsWith("/hdiffdown")) {
+    changeDiff(0, 1);
+  } else if (server.uri().endsWith("/ldiffup")) {
+    changeDiff(0, 0);
+  } else if (server.uri().endsWith("/ldiffdown")) {
+    changeDiff(1, 0);
+  }
   server.send(200, "text/html", formatHtml()); 
 }
 
@@ -240,6 +219,17 @@ String formatHtml()
   } else {
     compStatus = "Compressor running for " + (String) ((millis() - compressorTime) / 1000) + " secs. (Max " + (String) (COMPMAXTIME / 1000) + " secs.)";
   }
+  String compRunTime = "";
+  unsigned short i = 0;
+  for (; i < COMPHISTORY; i++) {
+    if (!compHistory[i]) {
+      break;
+    }
+    compRunTime += "    <p>" + (String) i + ": " + (String) ((millis() - compressorTime) / 1000) + " seconds.</p>\n";
+  }
+  if (compRunTime != "") {
+    compRunTime = "    <p>Run time for last " + (String) i + " runs of the compressor:</p>\n" + compRunTime;
+  }
   String html = "<!DOCTYPE html>\n";
   html += "<html lang=\"en-US\">\n";
   html += "  <head>\n";
@@ -254,23 +244,35 @@ String formatHtml()
   html += "    <p><a href=\"power\">Power</a>: <b style=\"color: " + (String) (unitOn ? "green\">On" : "red\">Off") + "</b></p>\n";
   html += "    <p>Fan Speed: " + fanSpd + " <a href=\"fanup\">[UP]</a> <a href=\"fandown\">[DOWN]</a></p>\n";
   html += "    <p>Desired Temperature: <b style=\"color: green\">" + (String) desiredTemp + "C</b> <a href=\"tempup\">[UP]</a> <a href=\"tempdown\">[DOWN]</a></p>\n";
+  html += "    <p>Compressor turns on at:  <b style=\"color: green\">" + (String) (desiredTemp + tempDifferentialHigh) +  "C</b> <a href=\"hdiffup\">[UP]</a> <a href=\"hdiffdown\">[DOWN]</a></p>\n";
+  html += "    <p>Compressor turns off at:  <b style=\"color: green\">" + (String) (desiredTemp - tempDifferentialLow) +  "C</b> <a href=\"ldiffup\">[UP]</a> <a href=\"ldiffdown\">[DOWN]</a></p>\n";
   html += "    <p>Room Temperature: <b style=\"color: green\">" + (String) roomTemp + "C</b></p>\n";
   html += "    <p>Compressor: <b style=\"color: " + (String) (digitalRead(relays[COMPRESSOR].pin) == HIGH ? "green\">On" : "red\">Off") + "</b></p>\n";
   html += "    <p>Compressor Status: " + compStatus + "</p>\n";
+  html += compRunTime;
   html += "  </body>\n";
   html += "</html>\n";
   return html;
 }
 
+void updateCompHistory()
+{
+  for (unsigned short i = 1; i < COMPHISTORY; i++) {
+    compHistory[i] = compHistory[i-1];
+  }
+  compHistory[0] = compressorTime;
+}
+
 void toggleUnit()
 {
-#ifdef DEBUG
-  Serial.print("Compressor / Fan control ");
-  Serial.print(unitOn ? "disabled" : "enabled");
-  Serial.println(" until power button is pressed again.");
-#endif
   if (unitOn) {
-    unitOff();
+    if (digitalRead(relays[COMPRESSOR].pin) == HIGH) {
+      toggleRelay(COMPRESSOR, 0);
+      updateCompHistory();
+      compressorTime = millis();
+    }
+    fanTime = millis();
+    unitOn = 0;
   } else {
     unitOn = 1;
   }
@@ -278,22 +280,9 @@ void toggleUnit()
 
 void toggleRelay(short relay, bool on)
 {
-#ifdef DEBUG
-  const char * rType = (relay == COMPRESSOR) ? "compressor" : "fan";
-#endif
   if ((on && digitalRead(relays[relay].pin) == HIGH) || (!on && digitalRead(relays[relay].pin) == LOW)) {
-#ifdef DEBUG
-    Serial.print("Not toggling ");
-    Serial.print(rType);
-    Serial.println(", already in proper state.");
-#endif
     return;
   }
-#ifdef DEBUG
-  Serial.print("Turning ");
-  Serial.print(rType);
-  Serial.println(on ? " on." : " off");
-#endif
   digitalWrite(relays[relay].pin, (on ? HIGH : LOW));
 }
 
@@ -309,9 +298,6 @@ void checkTemp()
     // 26 - 24.5 = 1.5 // 1.5 >= 1.5
     if ((roomTemp - desiredTemp) >= tempDifferentialHigh) {
       wantAC = 1;
-#ifdef DEBUG
-      Serial.println("Room temperature is higher than desired temperature");
-#endif
       return;
     }
     wantAC = 0;
@@ -324,34 +310,21 @@ void checkAC()
     if (digitalRead(relays[COMPRESSOR].pin) == LOW) {
       // If compressor was started in last 5 mins, or after power failure, don't start (allows cap to charge)
       if (checkMillis(compressorTime, COMPGRACETIME, 1)) {
-#ifdef DEBUG
-        Serial.println("Compressor grace time");
-#endif
         return;
       }
       toggleAC(1);
       return;
     }
     if (!checkMillis(compressorTime, COMPMAXTIME, 1)) {
-#ifdef DEBUG
-      Serial.println("Compressor on too long, turning off");
-#endif
       toggleAC(0);
     }
   } else if (digitalRead(relays[COMPRESSOR].pin) == HIGH) {
-#ifdef DEBUG
-    Serial.println("Don't want compressor anymore, turning off");
-#endif
     toggleAC(0);
   }
 }
 
 void changeDesiredTemp(bool direction)
 {
-#ifdef DEBUG
-  Serial.print("Changed desired tmeprature from ");
-  Serial.print(desiredTemp);
-#endif
   float oldTemp = desiredTemp;
   if (direction && desiredTemp < 30) {
     desiredTemp += 0.5;
@@ -359,18 +332,27 @@ void changeDesiredTemp(bool direction)
   if (!direction && desiredTemp > 16) {
     desiredTemp -= 0.5;
   }
-#ifdef DEBUG
-  Serial.print(" to ");
-  Serial.println(desiredTemp);
-#endif
+}
+
+void changeDiff(bool direction, bool high)
+{
+  if (high) {
+    if (direction && tempDifferentialHigh < maxTempDiff) {
+      tempDifferentialHigh += 0.1;
+    } else if (!direction && tempDifferentialHigh > minTempDiff) {
+      tempDifferentialHigh -= 0.1;
+    }
+  } else {
+    if (direction && tempDifferentialLow < maxTempDiff) {
+      tempDifferentialLow += 0.1;
+    } else if (!direction && tempDifferentialLow > minTempDiff) {
+      tempDifferentialLow -= 0.1;
+    }
+  }
 }
 
 void toggleAC(bool on)
 {
-#ifdef DEBUG
-  Serial.print(on ? "Starting" : "Stopping");
-  Serial.println(" Air Conditioner");
-#endif
   if (on) {
     toggleRelay(fanSpeed, on);
   } else {
@@ -390,29 +372,12 @@ void toggleFanSpeed(bool up)
     fanSpeed--;
   }
   if (oldFanSpeed == fanSpeed) {
-#ifdef DEBUG
-    Serial.println("Not changing fan speed, same fan speed requested.");
-#endif
     return;
   }
   if (digitalRead(relays[oldFanSpeed].pin) == HIGH) {
     digitalWrite(relays[oldFanSpeed].pin, LOW);
     digitalWrite(relays[fanSpeed].pin, HIGH);
   }
-#ifdef DEBUG
-  Serial.print("Changed fan speed from ");
-  Serial.print(oldFanSpeed);
-  Serial.print(" to ");
-  Serial.println(fanSpeed);
-#endif
-}
-
-void unitOff()
-{
-  toggleRelay(COMPRESSOR, 0);
-  compressorTime = millis();
-  fanTime = millis();
-  unitOn = 0;
 }
 
 void getTemp()
@@ -420,22 +385,3 @@ void getTemp()
   tempSensor.requestTemperatures();
   roomTemp = tempSensor.getTempCByIndex(0);
 }
-
-#ifdef DEBUG
-void printSerial()
-{
-  Serial.print("Temperature: ");
-  Serial.print(roomTemp);
-  Serial.print("C    Wanted Temp: ");
-  Serial.print(desiredTemp);
-  Serial.print("C   Comp ");
-  Serial.print(digitalRead(relays[COMPRESSOR].pin));
-  Serial.print("   WantAC ");
-  Serial.print(wantAC);
-  Serial.print("   Fan " );
-  Serial.print((digitalRead(relays[fanSpeed].pin) == LOW) ? "off" : "on");
-  Serial.print(" (speed ");
-  Serial.print(fanSpeed);
-  Serial.println(")");
-}
-#endif
