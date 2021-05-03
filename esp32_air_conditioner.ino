@@ -247,8 +247,6 @@ void toggleUnit()
   if (unitOn) {
     if (digitalRead(relays[COMPRESSOR].pin) == HIGH) {
       toggleRelay(COMPRESSOR, 0);
-      prevCompressorTime = millis() - compressorTime;
-      averageCompressorTime = averageCompressorTime == 0 ? prevCompressorTime : (unsigned long) ((prevCompressorTime + averageCompressorTime) / 2);
       compressorTime = millis();
     }
     fanTime = millis();
@@ -336,6 +334,8 @@ void toggleAC(bool on)
   if (on) {
     toggleRelay(fanSpeed, on);
   } else {
+    prevCompressorTime = millis() - compressorTime;
+    averageCompressorTime = averageCompressorTime == 0 ? prevCompressorTime : (unsigned long) ((prevCompressorTime + averageCompressorTime) / 2);
     fanTime = millis();
   }
   toggleRelay(COMPRESSOR, on);
