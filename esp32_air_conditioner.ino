@@ -49,12 +49,6 @@ relayArr relays[RELAYS] = { // Pins for the relays.
   {COMPRESSOR, 16}
 };
 
-// Holds the last x runtime for the compressor.
-#define COMPHISTORY 10
-unsigned long compHistory[COMPHISTORY] = {
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-};
-
 const unsigned short LOOPDELAY = 500; // Main loop delay.
 const unsigned short LOGICDLEAY = 2000; // Delay between check compressor / fan status.
 const unsigned long COMPMAXTIME = 1200000; // Max amount of milliseconds compressor can run.
@@ -80,12 +74,13 @@ void toggleRelay(short, bool);
 void checkWiFi();
 void webProcess();
 String formatHtml();
-void updateCompHistory();
 
 bool unitOn = 0;
 bool wantAC = 0;
 
-unsigned long compressorTime;
+unsigned long compressorTime; // Current runtime for the compressor.
+unsigned long prevCompressorTime = 0; // Previous runtime for the compressor.
+unsigned long averageCompressorTime = 0; // Average compressor time since AC turned on.
 unsigned long delayTimer = 0;
 unsigned long fanTime = 0;
 unsigned long tempTime = 0;
@@ -219,17 +214,6 @@ String formatHtml()
   } else {
     compStatus = "Compressor running for " + (String) ((millis() - compressorTime) / 1000) + " secs. (Max " + (String) (COMPMAXTIME / 1000) + " secs.)";
   }
-  String compRunTime = "";
-  unsigned short i = 0;
-  for (; i < COMPHISTORY; i++) {
-    if (!compHistory[i]) {
-      break;
-    }
-    compRunTime += "    <p>" + (String) i + ": " + (String) ((millis() - compressorTime) / 1000) + " seconds.</p>\n";
-  }
-  if (compRunTime != "") {
-    compRunTime = "    <p>Run time for last " + (String) i + " runs of the compressor:</p>\n" + compRunTime;
-  }
   String html = "<!DOCTYPE html>\n";
   html += "<html lang=\"en-US\">\n";
   html += "  <head>\n";
@@ -249,18 +233,13 @@ String formatHtml()
   html += "    <p>Room Temperature: <b style=\"color: green\">" + (String) roomTemp + "C</b></p>\n";
   html += "    <p>Compressor: <b style=\"color: " + (String) (digitalRead(relays[COMPRESSOR].pin) == HIGH ? "green\">On" : "red\">Off") + "</b></p>\n";
   html += "    <p>Compressor Status: " + compStatus + "</p>\n";
-  html += compRunTime;
+  if (prevCompressorTime > 0 ){
+    html += "    <p>Last compressor runtime: " + (String) (prevCompressorTime / 1000) + " seconds.</p>\n";
+    html += "    <p>Average compressor runtime: " + (String) (averageCompressorTime / 1000) + " seconds.</p>\n";
+  }
   html += "  </body>\n";
   html += "</html>\n";
   return html;
-}
-
-void updateCompHistory()
-{
-  for (unsigned short i = 1; i < COMPHISTORY; i++) {
-    compHistory[i] = compHistory[i-1];
-  }
-  compHistory[0] = compressorTime;
 }
 
 void toggleUnit()
@@ -268,7 +247,8 @@ void toggleUnit()
   if (unitOn) {
     if (digitalRead(relays[COMPRESSOR].pin) == HIGH) {
       toggleRelay(COMPRESSOR, 0);
-      updateCompHistory();
+      prevCompressorTime = millis() - compressorTime;
+      averageCompressorTime = averageCompressorTime == 0 ? prevCompressorTime : (unsigned long) ((prevCompressorTime + averageCompressorTime) / 2);
       compressorTime = millis();
     }
     fanTime = millis();
