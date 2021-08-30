@@ -162,9 +162,11 @@ bool checkWiFi()
   if (WiFi.status() == WL_CONNECTED) {
     return true;
   }
-  if (wcLoops++ > WCLOOPS && WiFi.begin(SSID, WPAPASS) == WL_CONNECTED) {
+  if (wcLoops++ > WCLOOPS) {
     wcLoops = 0;
-    return true;
+    if (WiFi.begin(SSID, WPAPASS) == WL_CONNECTED) {
+      return true;
+    }
   }
   return false;
 }
