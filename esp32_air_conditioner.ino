@@ -51,6 +51,7 @@ relayArr relays[RELAYS] = { // Pins for the relays.
 
 const unsigned short LOOPDELAY = 500; // Main loop delay.
 const unsigned short LOGICDLEAY = 2000; // Delay between check compressor / fan status.
+const unsigned short WCLOOPS = 10; // How many loops to wait before retrying to connect to wifi.
 const unsigned long COMPMAXTIME = 1200000; // Max amount of milliseconds compressor can run.
 const unsigned long COMPGRACETIME = 120000; // Amount of milliseconds to wait between cycling compressor.
 const unsigned long FANOFFTIME = 60000; // Amount of milliseconds to keep fan on after turning off compressor.
@@ -71,11 +72,11 @@ void changeDiff(bool, bool);
 void toggleAC();
 void toggleFanSpeed(bool);
 void toggleRelay(short, bool);
-void checkWiFi();
+bool checkWiFi();
 void webProcess();
 String formatHtml();
 
-bool unitOn = 0;
+bool unitOn = 1;
 bool wantAC = 0;
 
 unsigned long compressorTime; // Current runtime for the compressor.
@@ -84,10 +85,11 @@ unsigned long averageCompressorTime = 0; // Average compressor time since AC tur
 unsigned long delayTimer = 0;
 unsigned long fanTime = 0;
 unsigned long tempTime = 0;
+unsigned short wcLoops = 0;
 
 unsigned short fanSpeed = 0;
 
-float desiredTemp = 25.0;
+float desiredTemp = 24.5;
 float roomTemp = 0.0;
 // Room temp needs to be at least this much higher than desired temp to start compressor
 float tempDifferentialHigh = 0.5;
@@ -108,7 +110,8 @@ void setup()
   digitalWrite(LED_BUILTIN, LOW);
   tempSensor.begin();
   getTemp();
-  checkWiFi();
+  WiFi.begin(SSID, WPAPASS);
+  delay(10000);
 
   server.on("/", webProcess);
   server.on("/power", webProcess);
@@ -148,24 +151,22 @@ void loop()
     checkAC();
     delayTimer = millis();
   }
-  checkWiFi();
-  if (WiFi.status() == WL_CONNECTED) {
+  if (checkWiFi()) {
     server.handleClient();
   }
   delay(LOOPDELAY);
 }
 
-void checkWiFi()
+bool checkWiFi()
 {
   if (WiFi.status() == WL_CONNECTED) {
-    return;
+    return true;
   }
-  for (int i = 0; i < 5; i++) {
-    if (WiFi.begin(SSID, WPAPASS) == WL_CONNECTED) {
-      break;
-    }
-    delay(2000);
+  if (wcLoops++ > WCLOOPS && WiFi.begin(SSID, WPAPASS) == WL_CONNECTED) {
+    wcLoops = 0;
+    return true;
   }
+  return false;
 }
 
 void webProcess()
